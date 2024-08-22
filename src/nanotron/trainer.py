@@ -691,7 +691,7 @@ class DistributedTrainer:
                 if not lang_losses[
                     lang
                 ]:  # If the list is empty --> Set local language loss to -1 to exclude it from the global computation
-                    lang_losses[lang] = torch.tensor(-1, dtype=torch.float32)
+                    lang_losses[lang] = torch.tensor(-1, dtype=torch.float32, device="cuda")
                 else:  # If we have at least 1 loss from a given language --> compute local language loss mean
                     lang_losses[lang] = torch.mean(torch.stack(lang_losses[lang]))
 
