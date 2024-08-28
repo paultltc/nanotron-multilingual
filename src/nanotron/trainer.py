@@ -255,7 +255,7 @@ class DistributedTrainer:
         )
         self.sequence_length = self.config.tokens.sequence_length
         self.iteration_step = self.metadata.last_train_step
-        self.val_n_micro_batches_per_batch = self.config.tokens.limit_val_batches or -1
+        self.val_n_micro_batches_per_batch = self.config.tokens.limit_val_batches
         # NOTE: the dataloader currently in use for the current training stage
         self.current_dataloader: Optional[DataLoader] = None
         # NOTE: the dataloader currently in use for the current validation stage
@@ -724,7 +724,7 @@ class DistributedTrainer:
         return outputs, loss_avg
 
     def validation_step(self, dataloader: Iterator[Dict[str, Union[torch.Tensor, TensorPointer]]]) -> Iterable[Dict]:
-        self.val_n_micro_batches_per_batch = self.val_n_micro_batches_per_batch if self.val_n_micro_batches_per_batch >= 0 else self.current_validation_dataloader_lenght
+        self.val_n_micro_batches_per_batch = self.val_n_micro_batches_per_batch if self.val_n_micro_batches_per_batch > 0 else self.current_validation_dataloader_lenght
         outputs, lang_codes = self.pipeline_engine.validate_batch_iter(
             model=self.model,
             batch=(next(dataloader) for _ in range(self.val_n_micro_batches_per_batch)),
