@@ -255,7 +255,7 @@ class DistributedTrainer:
         )
         self.sequence_length = self.config.tokens.sequence_length
         self.iteration_step = self.metadata.last_train_step
-        self.limit_val_batches = self.config.tokens.limit_val_batches
+        self.val_n_micro_batches_per_batch = self.config.tokens.limit_val_batches or -1
         # NOTE: the dataloader currently in use for the current training stage
         self.current_dataloader: Optional[DataLoader] = None
         # NOTE: the dataloader currently in use for the current validation stage
@@ -294,6 +294,26 @@ class DistributedTrainer:
         pass
 
     def post_training(self):
+        pass
+    
+    def pre_evaluate(self, *args, **kwargs):
+        log_rank(
+            f"[Start evaluation] datetime: {datetime.datetime.now()} | eval_samples: {self.val_n_micro_batches_per_batch} | sequence_length: {self.sequence_length}",
+            logger=logger,
+            level=logging.INFO,
+            rank=0,
+        )
+
+        current_time = datetime.datetime.now().strftime("%d/%m/%Y_%H:%M:%S")
+        if dist.get_rank(self.parallel_context.world_pg) == self.logger_ranks[0] and wandb is not None:
+            wandb.init(
+                project=self.config.general.project,
+                name=f"eval_{current_time}_{self.config.general.project}_{self.config.general.run}",
+                entity=self.config.general.entity,
+                config={"nanotron_config": self.config.as_dict()},
+            )
+
+    def post_evaluate(self):
         pass
 
     def _print_training_plan(self):
@@ -544,7 +564,9 @@ class DistributedTrainer:
 
                 # Validation stage
                 if not valid_dataloader_or_dls is None and self.iteration_step % self.config.tokens.val_check_interval == 0:
+                    self.validation_step_start_time = time.time()
                     self._prepare_dataloader_for_validation_stage(valid_dataloader_or_dls)
+                    
                     val_global_loss, val_lang_losses = self.validation_step(
                         dataloader=self.current_validation_dataloader
                     )
@@ -572,6 +594,40 @@ class DistributedTrainer:
         dist.barrier()  # let's wait for everyone before leaving
 
         self.post_training()
+
+    def evaluate(self, 
+        valid_dataloader_or_dls: Dict[
+            str, Union[Iterator[Dict[str, Union[torch.Tensor, TensorPointer]]], Tuple[Iterator, ...]]
+        ],
+        **kwargs) -> None:
+        self.pre_evaluate(**kwargs)
+
+        self.pipeline_engine: PipelineEngine = self.config.parallelism.pp_engine
+
+        self.pipeline_engine.nb_microbatches = self.n_micro_batches_per_batch
+
+        # TODO @nouamanetazi: refactor this
+        # Useful mapping
+        self.unwrapped_model = self.model.module if isinstance(self.model, DistributedDataParallel) else self.model
+        self.unwrapped_model.module_id_to_prefix = {
+            id(module): f"{module_name}." for module_name, module in self.unwrapped_model.named_modules()
+        }
+        # Fix the root_model
+        self.unwrapped_model.module_id_to_prefix[id(self.unwrapped_model)] = ""
+
+        self.validation_step_start_time = time.time()
+        self._prepare_dataloader_for_validation_stage(valid_dataloader_or_dls)
+
+        # Evaluation step
+        val_global_loss, val_lang_losses = self.validation_step(
+            dataloader=self.current_validation_dataloader
+        )
+        self.validation_step_time = time.time()
+
+        # Evaluation logs
+        self.validation_step_logs(global_loss=val_global_loss, lang_losses=val_lang_losses)
+
+        self.post_evaluate()
 
     def training_step(
         self, dataloader: Iterator[Dict[str, Union[torch.Tensor, TensorPointer]]]
@@ -668,10 +724,11 @@ class DistributedTrainer:
         return outputs, loss_avg
 
     def validation_step(self, dataloader: Iterator[Dict[str, Union[torch.Tensor, TensorPointer]]]) -> Iterable[Dict]:
+        self.val_n_micro_batches_per_batch = self.val_n_micro_batches_per_batch if self.val_n_micro_batches_per_batch >= 0 else self.current_validation_dataloader_lenght
         outputs, lang_codes = self.pipeline_engine.validate_batch_iter(
             model=self.model,
-            batch=(next(dataloader) for _ in range(self.current_validation_dataloader_lenght)),
-            nb_microbatches=self.current_validation_dataloader_lenght,
+            batch=(next(dataloader) for _ in range(self.val_n_micro_batches_per_batch)),
+            nb_microbatches=self.val_n_micro_batches_per_batch,
         )
 
         lang_losses = {
@@ -742,20 +799,6 @@ class DistributedTrainer:
             global_batch_size=self.global_batch_size,
         )
 
-        # Validation metrics
-        if global_loss is not None:
-            validation_total_samples = self.current_validation_dataloader_lenght * self.micro_batch_size
-            validation_elapsed_time_per_iteration_ms = (self.validation_step_time - self.training_step_time) * 1000
-            validation_tokens_per_sec = (
-                validation_total_samples * self.sequence_length / (validation_elapsed_time_per_iteration_ms / 1000)
-            )
-
-            validation_model_tflops, validation_hardware_tflops = self.unwrapped_model.get_flops_per_sec(
-                iteration_time_in_sec=validation_elapsed_time_per_iteration_ms / 1000,
-                sequence_length=self.sequence_length,
-                global_batch_size=validation_total_samples,
-            )
-
         if dist.get_rank(self.parallel_context.world_pg) in self.logger_ranks:
             assert self.loggerwriter is not None, "loggerwriter should be defined on logger ranks"
 
@@ -782,46 +825,6 @@ class DistributedTrainer:
 
             if self.config.optimizer.clip_grad is not None:
                 log_entries.append(LogItem("grad_norm", self.grad_norm_unclipped.item(), "human_format"))  # , ".3f"))
-
-            # Validation metrics
-            if global_loss is not None:
-                log_entries.extend(
-                    [
-                        LogItem(
-                            "validation_consumed_tokens",
-                            validation_total_samples * self.sequence_length,
-                            "human_format",
-                        ),  # , "12d"),
-                        LogItem(
-                            "validation_elapsed_time_per_iteration_ms",
-                            validation_elapsed_time_per_iteration_ms,
-                            "human_format",
-                        ),  # , ".1f"),
-                        LogItem("validation_tokens_per_sec", validation_tokens_per_sec, "human_format"),  # , "1.6E"),
-                        LogItem(
-                            "validation_tokens_per_sec_per_gpu",
-                            validation_tokens_per_sec / self.parallel_context.world_pg.size(),
-                            "human_format",
-                        ),  # , "1.6E"),
-                        LogItem("validation_loss", global_loss.item(), "human_format"),  # , "1.6E"),
-                        LogItem(
-                            "validation_model_tflops_per_gpu", validation_model_tflops / 3, "human_format"
-                        ),  # , ".2f"), # NOTE(tj.solergibert) Check llama.py --> def get_flops() --> model_flops for explanation of the / 3 factor
-                        LogItem(
-                            "validation_hardware_tflops_per_gpu", validation_hardware_tflops / 3, "human_format"
-                        ),  # , ".2f"), # NOTE(tj.solergibert) Check llama.py --> def get_flops() --> model_flops for explanation of the / 3 factor
-                    ]
-                )
-
-                # NOTE Currently you have to log each lang metric one by one and then merge them manually in the same plot through the wandb UI.
-                #   Example: https://community.wandb.ai/t/log-multiple-variables-at-the-same-plot/2474
-                #   GitHub complains: https://github.com/wandb/wandb/issues/3035
-                log_entries.extend(
-                    [
-                        LogItem(f"{lang}_validation_loss", loss.item(), "human_format")
-                        for lang, loss in lang_losses.items()
-                    ]
-                )
 
             # Log not too often the memory
             if self.iteration_step < 5 or (self.iteration_step - 1) % self.config.checkpoints.checkpoint_interval == 0:
@@ -851,6 +854,10 @@ class DistributedTrainer:
 
             self.loggerwriter.add_scalars_from_list(log_entries, self.iteration_step)
 
+        # Validation metrics
+        if global_loss is not None:
+            self.validation_step_logs(global_loss, lang_losses)
+
         # Nanotron Benchmark mode: we log the throughput and exit
         if os.environ.get("NANOTRON_BENCHMARK", "0") == "1" and self.iteration_step == 3:
             log_throughput(
@@ -865,6 +872,77 @@ class DistributedTrainer:
                 os.system("scancel " + os.environ["SLURM_JOB_ID"])
             else:
                 exit(0)
+
+    def validation_step_logs(
+        self,
+        global_loss: torch.Tensor,
+        lang_losses: torch.Tensor,
+    ) -> None:
+        val_log_entries = []
+
+        validation_total_samples = self.val_n_micro_batches_per_batch * self.micro_batch_size
+        validation_elapsed_time_per_iteration_ms = (self.validation_step_time - self.validation_step_start_time) * 1000
+        validation_tokens_per_sec = (
+            validation_total_samples * self.sequence_length / (validation_elapsed_time_per_iteration_ms / 1000)
+        )
+
+        validation_model_tflops, validation_hardware_tflops = self.unwrapped_model.get_flops_per_sec(
+            iteration_time_in_sec=validation_elapsed_time_per_iteration_ms / 1000,
+            sequence_length=self.sequence_length,
+            global_batch_size=validation_total_samples,
+        )
+
+        if dist.get_rank(self.parallel_context.world_pg) in self.logger_ranks:
+            assert self.loggerwriter is not None, "loggerwriter should be defined on logger ranks"
+            val_log_entries.extend(
+                [
+                    LogItem(
+                        "validation_consumed_tokens",
+                        validation_total_samples * self.sequence_length,
+                        "human_format",
+                    ),  # , "12d"),
+                    LogItem(
+                        "validation_elapsed_time_per_iteration_ms",
+                        validation_elapsed_time_per_iteration_ms,
+                        "human_format",
+                    ),  # , ".1f"),
+                    LogItem("validation_tokens_per_sec", validation_tokens_per_sec, "human_format"),  # , "1.6E"),
+                    LogItem(
+                        "validation_tokens_per_sec_per_gpu",
+                        validation_tokens_per_sec / self.parallel_context.world_pg.size(),
+                        "human_format",
+                    ),  # , "1.6E"),
+                    LogItem("validation_loss", global_loss.item(), "human_format"),  # , "1.6E"),
+                    LogItem(
+                        "validation_model_tflops_per_gpu", validation_model_tflops / 3, "human_format"
+                    ),  # , ".2f"), # NOTE(tj.solergibert) Check llama.py --> def get_flops() --> model_flops for explanation of the / 3 factor
+                    LogItem(
+                        "validation_hardware_tflops_per_gpu", validation_hardware_tflops / 3, "human_format"
+                    ),  # , ".2f"), # NOTE(tj.solergibert) Check llama.py --> def get_flops() --> model_flops for explanation of the / 3 factor
+                ]
+            )
+
+            # NOTE Currently you have to log each lang metric one by one and then merge them manually in the same plot through the wandb UI.
+            #   Example: https://community.wandb.ai/t/log-multiple-variables-at-the-same-plot/2474
+            #   GitHub complains: https://github.com/wandb/wandb/issues/3035
+            val_log_entries.extend(
+                [
+                    LogItem(f"{lang}_validation_loss", loss.item(), "human_format")
+                    for lang, loss in lang_losses.items()
+                ]
+            )
+
+        # NOTE: only one rank writes to wandb
+        if dist.get_rank(self.parallel_context.world_pg) == self.logger_ranks[0] and wandb is not None:
+            wandb.log(
+                {
+                    **{log_item.tag: log_item.scalar_value for log_item in val_log_entries},
+                    "iteration_step": self.iteration_step,
+                }
+            )
+
+        self.loggerwriter.add_scalars_from_list(val_log_entries, self.iteration_step)
+
 
     def init_model(self) -> Union[NanotronModel, DistributedDataParallel]:
         """Initialize the model and load weights from checkpoint if needed."""
