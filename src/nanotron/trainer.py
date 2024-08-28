@@ -507,7 +507,7 @@ class DistributedTrainer:
         ],
         valid_dataloader_or_dls: Dict[
             str, Union[Iterator[Dict[str, Union[torch.Tensor, TensorPointer]]], Tuple[Iterator, ...]]
-        ],
+        ] = None,
         **kwargs,
     ) -> None:
         self.pre_training(**kwargs)
@@ -543,7 +543,7 @@ class DistributedTrainer:
                 self.training_step_time = time.time()
 
                 # Validation stage
-                if self.iteration_step % self.config.tokens.val_check_interval == 0:
+                if not valid_dataloader_or_dls is None and self.iteration_step % self.config.tokens.val_check_interval == 0:
                     self._prepare_dataloader_for_validation_stage(valid_dataloader_or_dls)
                     val_global_loss, val_lang_losses = self.validation_step(
                         dataloader=self.current_validation_dataloader
