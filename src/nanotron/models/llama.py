@@ -848,18 +848,18 @@ class Loss(nn.Module):
         # Megatron by defaults cast everything in fp32. `--f16-lm-cross-entropy` is an option you can use to keep current precision.
         # https://github.com/NVIDIA/Megatron-LM/blob/f267e6186eae1d6e2055b412b00e2e545a8e896a/megatron/model/gpt_model.py#L38
 
-        sample_loss = sharded_cross_entropy(
+        sample_loss_per_token = sharded_cross_entropy(
             sharded_logits, label_ids.transpose(0, 1).contiguous(), group=self.tp_pg, dtype=torch.float
         ).transpose(0, 1)
         # TODO @thomasw21: It's unclear what kind of normalization we want to do.
-        sample_loss = masked_mean(sample_loss, label_mask, dtype=torch.float)
+        sample_loss = masked_mean(sample_loss_per_token, label_mask, dtype=torch.float)
         # NOTE(tj.solergibert) masked_mean returns a single scalar with the batch loss. We've changed it to compute the SAMPLE loss.
         # We will continue using "loss" as the batch loss but we add "sample_loss" for the multilingual effort.
         # WARN(tj.solergibert) Don't panic, the batch loss used to update the parameters is computed in `LlamaForTraining`
 
         # TODO @thomasw21: I think indexing causes a sync we don't actually want
         # TODO @thomasw21: loss = loss[label_mask].sum()
-        return {"sample_loss": sample_loss}
+        return {"sample_loss": sample_loss, "sample_loss_per_token": sample_loss_per_token}
 
 
 class LlamaForTraining(NanotronModel):
@@ -881,7 +881,7 @@ class LlamaForTraining(NanotronModel):
                 "label_ids",
                 "label_mask",
             },
-            module_output_keys={"sample_loss"},
+            module_output_keys={"sample_loss", "sample_loss_per_token"},
         )
         self.parallel_context = parallel_context
         self.config = config
