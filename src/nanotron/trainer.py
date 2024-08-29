@@ -585,7 +585,7 @@ class DistributedTrainer:
                 ].consumed_train_samples += self.global_batch_size
 
                 if (self.iteration_step - 1) % self.config.logging.iteration_step_info_interval == 0:
-                    self.train_step_logs(loss_avg=loss_avg, global_loss=val_global_loss, lang_losses=val_lang_losses)
+                    self.train_step_logs(outputs, loss_avg=loss_avg, global_loss=val_global_loss, lang_losses=val_lang_losses)
 
                 # Checkpoint
                 if self.iteration_step % self.config.checkpoints.checkpoint_interval == 0:
@@ -781,9 +781,10 @@ class DistributedTrainer:
 
     def train_step_logs(
         self,
+        outputs: Iterable[Dict[str, Union[torch.Tensor, TensorPointer]]],
         loss_avg: Optional[torch.Tensor],
-        global_loss: torch.Tensor,
-        lang_losses: torch.Tensor,
+        global_loss: Optional[torch.Tensor],
+        lang_losses: Optional[torch.Tensor],
     ) -> None:
         # TODO @nouamanetazi: Megatron-LM seems to be using a barrier to report their interval time. Check if this is necessary. https://github.com/NouamaneTazi/Megatron-LM/blob/e241a96c3085b18e36c6cee1d68a8155de77b5a6/megatron/training.py#L607
         dist.barrier()
