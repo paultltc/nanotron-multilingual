@@ -848,7 +848,7 @@ class DistributedTrainer:
             if dist.get_rank(self.parallel_context.world_pg) == self.logger_ranks[0] and wandb is not None:
                 wandb.log(
                     {
-                        **{log_item.tag: log_item.scalar_value for log_item in log_entries},
+                        **{f"train/{log_item.tag}": log_item.scalar_value for log_item in log_entries},
                         "iteration_step": self.iteration_step,
                     }
                 )
@@ -937,7 +937,7 @@ class DistributedTrainer:
         if dist.get_rank(self.parallel_context.world_pg) == self.logger_ranks[0] and wandb is not None:
             wandb.log(
                 {
-                    **{log_item.tag: log_item.scalar_value for log_item in val_log_entries},
+                    **{f"validation/{log_item.tag}": log_item.scalar_value for log_item in val_log_entries},
                     "iteration_step": self.iteration_step,
                 }
             )
