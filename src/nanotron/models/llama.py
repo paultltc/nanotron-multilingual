@@ -755,7 +755,7 @@ class LlamaModel(nn.Module):
         self,
         input_ids: Union[torch.Tensor, TensorPointer],  # [batch_size, seq_length]
         input_mask: Union[torch.Tensor, TensorPointer],  # [batch_size, seq_length]
-        lang_code: Union[torch.Tensor, TensorPointer],  # [batch_size, 1]
+        lang_code: Union[torch.Tensor, TensorPointer] = None,  # [batch_size, 1]
     ):
         return self.forward_with_hidden_states(input_ids=input_ids, input_mask=input_mask, lang_code=lang_code)[0]
 
