@@ -52,6 +52,7 @@ class LightEvalTasksArgs:
     """Arguments related to tasks for LightEval"""
 
     tasks: Optional[str] = None
+    langs: Optional[str] = None
     custom_tasks: Optional[str] = None
     max_samples: Optional[int] = None
     num_fewshot_seeds: Optional[int] = None
