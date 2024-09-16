@@ -133,9 +133,12 @@ class DistributedTrainer:
         """
 
         super().__init__()
-        self.config = get_config_from_file(
-            config_or_config_file, config_class=config_class, model_config_class=model_config_class
-        )
+        if isinstance(config_or_config_file, Config):
+            self.config = config_or_config_file
+        else:
+            self.config = get_config_from_file(
+                config_or_config_file, config_class=config_class, model_config_class=model_config_class
+            )
         self.model_config = self.config.model.model_config
         if model_class is not None:
             CONFIG_TO_MODEL_CLASS[self.model_config.__class__.__name__] = model_class
@@ -933,16 +936,16 @@ class DistributedTrainer:
                 ]
             )
 
-        # NOTE: only one rank writes to wandb
-        if dist.get_rank(self.parallel_context.world_pg) == self.logger_ranks[0] and wandb is not None:
-            wandb.log(
-                {
-                    **{f"validation/{log_item.tag}": log_item.scalar_value for log_item in val_log_entries},
-                    "iteration_step": self.iteration_step,
-                }
-            )
+            # NOTE: only one rank writes to wandb
+            if dist.get_rank(self.parallel_context.world_pg) == self.logger_ranks[0] and wandb is not None:
+                wandb.log(
+                    {
+                        **{f"validation/{log_item.tag}": log_item.scalar_value for log_item in val_log_entries},
+                        "iteration_step": self.iteration_step,
+                    }
+                )
 
-        self.loggerwriter.add_scalars_from_list(val_log_entries, self.iteration_step)
+            self.loggerwriter.add_scalars_from_list(val_log_entries, self.iteration_step)
 
 
     def init_model(self) -> Union[NanotronModel, DistributedDataParallel]:
