@@ -589,6 +589,10 @@ class DistributedTrainer:
 
                 if (self.iteration_step - 1) % self.config.logging.iteration_step_info_interval == 0:
                     self.train_step_logs(outputs, loss_avg=loss_avg, global_loss=val_global_loss, lang_losses=val_lang_losses)
+                    
+                    # Validation metrics
+                    if val_global_loss is not None:
+                        self.validation_step_logs(global_loss=val_global_loss, lang_losses=val_lang_losses)
 
                 # Checkpoint
                 if self.iteration_step % self.config.checkpoints.checkpoint_interval == 0:
@@ -857,10 +861,6 @@ class DistributedTrainer:
                 )
 
             self.loggerwriter.add_scalars_from_list(log_entries, self.iteration_step)
-
-        # Validation metrics
-        if global_loss is not None:
-            self.validation_step_logs(global_loss, lang_losses)
 
         # Nanotron Benchmark mode: we log the throughput and exit
         if os.environ.get("NANOTRON_BENCHMARK", "0") == "1" and self.iteration_step == 3:
