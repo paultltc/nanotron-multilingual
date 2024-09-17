@@ -776,9 +776,9 @@ class DistributedTrainer:
             dist.all_reduce(global_loss_avg, group=self.parallel_context.dp_pg, op=dist.ReduceOp.AVG)
 
             # TODO(tj.solergibert) Delete this testing assertions
-            for lang in lang_losses.keys():
-                assert_tensor_synced_across_pg(tensor=lang_losses[lang], pg=self.parallel_context.dp_pg)
-            assert_tensor_synced_across_pg(tensor=global_loss_avg, pg=self.parallel_context.dp_pg)
+            # for lang in lang_losses.keys():
+            #     assert_tensor_synced_across_pg(tensor=lang_losses[lang], pg=self.parallel_context.dp_pg)
+            # assert_tensor_synced_across_pg(tensor=global_loss_avg, pg=self.parallel_context.dp_pg)
 
         else:
             global_loss_avg = None
