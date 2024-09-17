@@ -12,6 +12,9 @@ from nanotron.optim.gradient_accumulator import GradientAccumulator
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.tied_parameters import get_tied_id_to_param
 
+from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
+from typing import Dict, Generator, Iterator, List, Optional, Union, cast
+
 logger = get_logger(__name__)
 
 
@@ -247,3 +250,46 @@ def check_optim_state_in_sync(optimizer: optim.BaseOptimizer, pg: dist.ProcessGr
             assert_tensor_synced_across_pg(
                 tensor=tensor, pg=pg, msg=lambda err: f"{name} are not synced across DP {err}"
             )
+
+def sanity_check_dataloader(
+    dataloader: Iterator[Dict[str, Union[torch.Tensor, TensorPointer]]],
+    parallel_context: ParallelContext,
+    config: Config,
+) -> Iterator[Dict[str, Union[torch.Tensor, TensorPointer]]]:
+    for batch in dataloader:
+        micro_batch = {
+            k: v if isinstance(v, TensorPointer) else v.to("cuda", memory_format=torch.contiguous_format)
+            for k, v in batch.items()
+        }
+
+        if not config.general.ignore_sanity_checks:
+            # SANITY CHECK: Check input are not the same across DP
+            for key, value in sorted(micro_batch.items(), key=lambda x: x[0]):
+                if isinstance(value, TensorPointer):
+                    continue
+
+                if "mask" in key:
+                    # It's fine if mask is the same across DP
+                    continue
+
+                with assert_fail_except_rank_with(AssertionError, rank_exception=0, pg=parallel_context.dp_pg):
+                    assert_tensor_synced_across_pg(
+                        tensor=value, pg=parallel_context.dp_pg, msg=lambda err: f"{key} {err}"
+                    )
+
+            # SANITY CHECK: Check input are synchronized throughout TP
+            for key, value in sorted(micro_batch.items(), key=lambda x: x[0]):
+                if isinstance(value, TensorPointer):
+                    continue
+                assert_tensor_synced_across_pg(
+                    tensor=value,
+                    pg=parallel_context.tp_pg,
+                    msg=lambda err: f"{key} are not synchronized throughout TP {err}",
+                )
+
+            # SANITY CHECK: Check that input are synchronized throughout PP
+            # TODO @thomasw21: That's really hard to test as input gets sharded across the PP, let's assume it works for now.
+
+            # SANITY CHECK: Check that an input only exists on the PP rank responsible for it
+            # TODO @nouamanetazi: add this test
+        yield micro_batch

@@ -12,11 +12,6 @@ from nanotron import logging
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
 from nanotron.random import set_random_seed
-from nanotron.sanity_checks import (
-    assert_fail_except_rank_with,
-    assert_tensor_synced_across_pg,
-)
-
 try:
     import datasets
     from datasets import (
@@ -41,7 +36,6 @@ from nanotron.config import (
     NanosetDatasetsArgs,
     PretrainDatasetsArgs,
 )
-from nanotron.data.dataloader_builder import build_nanoset_dataloader
 from nanotron.helpers import (
     compute_remain_train_steps_of_a_data_stage_from_ckp,
     get_consumed_train_samples_of_a_data_stage_from_ckp,
@@ -59,52 +53,9 @@ except ImportError:
     hf_hub_version = None
     tf_version = None
 
+from nanotron.data.collator import MultilingualNanosetDataCollatorForCLM, NanosetDataCollatorForCLM
 
 logger = logging.get_logger(__name__)
-
-
-def sanity_check_dataloader(
-    dataloader: Iterator[Dict[str, Union[torch.Tensor, TensorPointer]]],
-    parallel_context: ParallelContext,
-    config: Config,
-) -> Iterator[Dict[str, Union[torch.Tensor, TensorPointer]]]:
-    for batch in dataloader:
-        micro_batch = {
-            k: v if isinstance(v, TensorPointer) else v.to("cuda", memory_format=torch.contiguous_format)
-            for k, v in batch.items()
-        }
-
-        if not config.general.ignore_sanity_checks:
-            # SANITY CHECK: Check input are not the same across DP
-            for key, value in sorted(micro_batch.items(), key=lambda x: x[0]):
-                if isinstance(value, TensorPointer):
-                    continue
-
-                if "mask" in key:
-                    # It's fine if mask is the same across DP
-                    continue
-
-                with assert_fail_except_rank_with(AssertionError, rank_exception=0, pg=parallel_context.dp_pg):
-                    assert_tensor_synced_across_pg(
-                        tensor=value, pg=parallel_context.dp_pg, msg=lambda err: f"{key} {err}"
-                    )
-
-            # SANITY CHECK: Check input are synchronized throughout TP
-            for key, value in sorted(micro_batch.items(), key=lambda x: x[0]):
-                if isinstance(value, TensorPointer):
-                    continue
-                assert_tensor_synced_across_pg(
-                    tensor=value,
-                    pg=parallel_context.tp_pg,
-                    msg=lambda err: f"{key} are not synchronized throughout TP {err}",
-                )
-
-            # SANITY CHECK: Check that input are synchronized throughout PP
-            # TODO @thomasw21: That's really hard to test as input gets sharded across the PP, let's assume it works for now.
-
-            # SANITY CHECK: Check that an input only exists on the PP rank responsible for it
-            # TODO @nouamanetazi: add this test
-        yield micro_batch
 
 
 # Adapted from h4/src/h4/data/loading.py
@@ -847,6 +798,66 @@ def get_dataloader_worker_init(dp_rank: int):
 
     return dataloader_worker_init
 
+def build_nanoset_dataloader(
+    dataset,
+    sequence_length: int,
+    parallel_context: ParallelContext,
+    input_pp_rank: int,
+    output_pp_rank: int,
+    micro_batch_size: int,
+    dataloader_num_workers: int,
+    is_multilingual: bool = False,
+    consumed_train_samples: int = 0,
+    dataloader_drop_last: bool = True,
+    dataloader_pin_memory: bool = True,
+    shuffle: bool = False,
+) -> DataLoader:
+
+    # Case of ranks not requiring data. We give them a dummy dataset, then the collator will do his job
+    if dist.get_rank(parallel_context.pp_pg) not in [input_pp_rank, output_pp_rank]:
+        dataset_length = len(dataset)
+        dataset = EmptyInfiniteDataset(length=dataset_length)
+        # No need to spawn a lot of workers, we can just use main
+        dataloader_num_workers = 0
+
+    data_collator = NanosetDataCollatorForCLM(
+        sequence_length=sequence_length,
+        input_pp_rank=input_pp_rank,
+        output_pp_rank=output_pp_rank,
+        parallel_context=parallel_context,
+    )
+
+    if is_multilingual:
+        data_collator = MultilingualNanosetDataCollatorForCLM(
+            sequence_length=sequence_length,
+            input_pp_rank=input_pp_rank,
+            output_pp_rank=output_pp_rank,
+            parallel_context=parallel_context,
+        )
+
+    # Compute size and rank of dataloader workers
+    dp_ranks_size = parallel_context.dp_pg.size()
+    dp_rank = parallel_context.dp_pg.rank()
+
+    sampler = get_sampler(
+        train_dataset=dataset,
+        dl_ranks_size=dp_ranks_size,
+        dl_rank=dp_rank,
+        drop_last=dataloader_drop_last,
+        consumed_train_samples=consumed_train_samples,
+        shuffle=shuffle,
+    )
+
+    return DataLoader(
+        dataset,
+        batch_size=micro_batch_size,
+        sampler=sampler,
+        collate_fn=data_collator,
+        drop_last=dataloader_drop_last,
+        num_workers=dataloader_num_workers,
+        pin_memory=dataloader_pin_memory,
+        worker_init_fn=get_dataloader_worker_init(dp_rank=dp_rank),
+    )
 
 class EmptyInfiniteDataset:
     """Hack as removing all columns from a datasets.Dataset makes the number of rows 0."""

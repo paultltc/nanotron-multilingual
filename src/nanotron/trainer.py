@@ -35,7 +35,6 @@ from nanotron.config import (
     get_config_from_file,
 )
 from nanotron.constants import MODEL_CONFIG_FILE_NAME
-from nanotron.dataloader import sanity_check_dataloader
 from nanotron.helpers import (
     _vocab_size_with_padding,
     compute_remain_train_steps_of_a_data_stage_from_ckp,
@@ -83,6 +82,7 @@ from nanotron.sanity_checks import (
     assert_tensor_synced_across_pg,
     before_optim_step_sanity_checks,
     before_tbi_sanity_checks,
+    sanity_check_dataloader
 )
 from nanotron.scaling.parametrization import ParametrizationMethod
 from nanotron.serialize import (
